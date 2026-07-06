@@ -1,0 +1,79 @@
+name: deepswe-spike
+
+# Proves one arm end-to-end in CI before building all four:
+# Claude Code on SUBSCRIPTION (CLAUDE_CODE_OAUTH_TOKEN), one TS DeepSWE task,
+# air-gapped sandbox + Pier allowlist, real verifier.
+
+on:
+  workflow_dispatch:
+    inputs:
+      task:
+        description: "DeepSWE task id"
+        default: "superjson-error-stack-serialization"
+      model:
+        description: "model_name for the claude-code agent"
+        default: "anthropic/claude-sonnet-4-5"
+
+jobs:
+  spike:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - name: Free runner disk
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache/CodeQL || true
+          docker system prune -af || true
+          df -h /
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Pier
+        run: |
+          python -m pip install -q --upgrade pip
+          python -m pip install -q datacurve-pier
+          pier --help >/dev/null && echo "pier installed"
+
+      - name: Clone DeepSWE tasks
+        run: git clone --depth 1 https://github.com/datacurve-ai/deep-swe.git
+
+      - name: Write job config
+        run: |
+          cat > job.yaml <<YAML
+          agents:
+            - name: claude-code
+              model_name: ${{ github.event.inputs.model }}
+              env:
+                CLAUDE_CODE_OAUTH_TOKEN: \${CLAUDE_CODE_OAUTH_TOKEN}
+          datasets:
+            - path: deep-swe/tasks
+              task_names: ["${{ github.event.inputs.task }}"]
+          YAML
+          echo "----- job.yaml -----"; cat job.yaml
+
+      - name: Write env file (token from secret; never printed)
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+        run: |
+          printf 'CLAUDE_CODE_OAUTH_TOKEN=%s\n' "$CLAUDE_CODE_OAUTH_TOKEN" > .env
+
+      - name: Run Pier (subscription auth, docker env)
+        run: |
+          pier run --config job.yaml --env-file .env --env docker || echo "pier exited nonzero"
+
+      - name: Show results
+        if: always()
+        run: |
+          echo "===== job tree ====="; find jobs -maxdepth 4 -type f 2>/dev/null | head -40
+          echo "===== reward / result json ====="
+          find jobs -name "reward.json" -o -name "*result*.json" 2>/dev/null | while read f; do echo "--- $f ---"; cat "$f"; echo; done
+
+      - name: Upload job dir
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: spike-job
+          path: jobs
+          if-no-files-found: ignore
+          retention-days: 14
