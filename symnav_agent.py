@@ -21,6 +21,7 @@ import json
 
 from pier.agents.installed.base import CliFlag
 from pier.agents.installed.claude_code import ClaudeCode
+from pier.agents.installed.codex import Codex
 from pier.agents.network import NetworkAllowlist
 from pier.models.agent.install import AgentInstallSpec, InstallStep
 
@@ -156,3 +157,52 @@ class SymnavClaudeCode(ClaudeCode):
     def network_allowlist(self) -> NetworkAllowlist:
         base = super().network_allowlist()
         return NetworkAllowlist(domains=sorted(set(base.domains) | set(_INSTALL_DOMAINS)))
+
+
+# ---------------------------------------------------------------------------
+# Codex arm
+# ---------------------------------------------------------------------------
+
+_AGENTS_MD = _CLAUDE_MD.replace("~/.claude/skills/symnav/SKILL.md",
+                                "~/.agents/skills/symnav/SKILL.md")
+
+# ChatGPT/OpenAI endpoints the Codex subscription (auth.json) needs while air-gapped.
+_CODEX_AUTH_DOMAINS = ["chatgpt.com", "api.openai.com", "auth.openai.com", "openai.com"]
+
+_CODEX_SYMNAV_STEP = InstallStep(
+    user="agent",
+    run=(
+        'set -euo pipefail; '
+        'export PATH="$HOME/.local/bin:$PATH"; '
+        'if [ -s "$HOME/.nvm/nvm.sh" ]; then . "$HOME/.nvm/nvm.sh"; fi; '
+        'mkdir -p "$HOME/.local/bin" "$HOME/.agents/skills/symnav"; '
+        'command -v node >/dev/null 2>&1 || { echo "node missing in image" >&2; exit 1; }; '
+        f'git clone --depth 1 {SYMNAV_REPO} "$HOME/symnav"; '
+        'cd "$HOME/symnav"; '
+        'corepack enable >/dev/null 2>&1 || npm install -g corepack >/dev/null 2>&1 || true; '
+        'corepack prepare pnpm@latest --activate >/dev/null 2>&1 || npm install -g pnpm >/dev/null 2>&1; '
+        'pnpm install --frozen-lockfile; '
+        'pnpm build; '
+        'printf \'#!/usr/bin/env bash\\nexec node "%s/symnav/apps/cli/dist/cli.js" "$@"\\n\' "$HOME" > "$HOME/.local/bin/symnav"; '
+        'chmod +x "$HOME/.local/bin/symnav"; '
+        # native Codex skill dir + a rule to read it
+        'cp "$HOME/symnav/.claude/skills/symnav/SKILL.md" "$HOME/.agents/skills/symnav/SKILL.md"; '
+        f'echo {_b64(_AGENTS_MD)} | base64 -d > "$HOME/.agents/AGENTS.md"; '
+        'symnav --version'
+    ),
+)
+
+
+class SymnavCodex(Codex):
+    """codex with symnav installed + skill registered in ~/.agents/skills."""
+
+    def install_spec(self) -> AgentInstallSpec:
+        spec = super().install_spec()
+        spec.steps = [*spec.steps, _ROOT_STEP, _CODEX_SYMNAV_STEP]
+        return spec
+
+    def network_allowlist(self) -> NetworkAllowlist:
+        base = super().network_allowlist()
+        return NetworkAllowlist(
+            domains=sorted(set(base.domains) | set(_INSTALL_DOMAINS) | set(_CODEX_AUTH_DOMAINS))
+        )

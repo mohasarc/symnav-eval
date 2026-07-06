@@ -1,0 +1,82 @@
+name: deepswe-codex-spike
+
+# Proves the Codex arm: subscription via injected auth.json (CODEX_FORCE_AUTH_JSON),
+# symnav installed + skill registered, one TS DeepSWE task.
+
+on:
+  workflow_dispatch:
+    inputs:
+      task:
+        default: "superjson-error-stack-serialization"
+      model:
+        default: "openai/gpt-5.5-codex"
+
+jobs:
+  spike:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Free runner disk
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache/CodeQL || true
+          docker system prune -af || true
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Pier
+        run: |
+          python -m pip install -q --upgrade pip
+          python -m pip install -q datacurve-pier
+
+      - name: Clone DeepSWE tasks
+        run: git clone --depth 1 https://github.com/datacurve-ai/deep-swe.git
+
+      - name: Write codex subscription auth.json (from secret; never printed)
+        env:
+          CODEX_AUTH_JSON_B64: ${{ secrets.CODEX_AUTH_JSON_B64 }}
+        run: |
+          mkdir -p ~/.codex
+          printf '%s' "$CODEX_AUTH_JSON_B64" | base64 -d > ~/.codex/auth.json
+          chmod 600 ~/.codex/auth.json
+          python -c "import json;json.load(open('$HOME/.codex/auth.json'));print('auth.json valid JSON')"
+
+      - name: Write job config (codex symnav arm)
+        run: |
+          cat > job.yaml <<YAML
+          agents:
+            - import_path: symnav_agent:SymnavCodex
+              model_name: ${{ github.event.inputs.model }}
+              env:
+                CODEX_FORCE_AUTH_JSON: "1"
+          datasets:
+            - path: deep-swe/tasks
+              task_names: ["${{ github.event.inputs.task }}"]
+          YAML
+          cat job.yaml
+
+      - name: Run Pier (codex, subscription)
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+        run: pier run --config job.yaml --env docker || echo "pier exited nonzero"
+
+      - name: Results + symnav adoption
+        if: always()
+        run: |
+          echo "===== reward ====="; find jobs -name "reward.json" -exec cat {} \; 2>/dev/null; echo
+          echo "===== real symnav invocations ====="
+          grep -rhoE '(^|[;&|]|&&)\s*symnav (resolve|overview|def|refs|context|graph)' jobs 2>/dev/null | grep -oE "symnav (resolve|overview|def|refs|context|graph)" | sort | uniq -c || echo none
+          echo "===== auth / errors ====="
+          grep -rhiE "auth|unauthorized|401|403|forbidden|login" jobs 2>/dev/null | grep -viE "author|Authorization: Bearer" | head -8
+
+      - name: Upload job dir
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: codex-spike-job
+          path: jobs
+          if-no-files-found: ignore
+          retention-days: 14
