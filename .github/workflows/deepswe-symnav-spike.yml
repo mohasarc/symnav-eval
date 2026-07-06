@@ -45,23 +45,6 @@ jobs:
               model_name: ${{ github.event.inputs.model }}
               env:
                 CLAUDE_CODE_OAUTH_TOKEN: \${CLAUDE_CODE_OAUTH_TOKEN}
-              kwargs:
-                append_system_prompt: |
-                  ## symnav — REQUIRED for navigating this TypeScript codebase
-
-                  For any code navigation on this task you MUST use the \`symnav\` CLI
-                  (run it via the Bash tool) BEFORE grepping or reading whole files to
-                  locate code. Fall back to grep/read only when symnav cannot answer.
-
-                  - \`symnav resolve <name>\` — find any symbol or file by name.
-                  - \`symnav overview <file>\` — a file's whole symbol tree without opening it.
-                  - \`symnav def <id>\` — where a symbol is defined.
-                  - \`symnav refs <id>\` — every reference/call site.
-                  - \`symnav context <id>\` — a symbol's definition, callers, callees, refs.
-                  - \`symnav graph <id>\` — call paths across hops.
-
-                  Each returns just what you asked for at a fraction of the tokens
-                  grep/read burn. Start every navigation step with the matching symnav command.
           datasets:
             - path: deep-swe/tasks
               task_names: ["${{ github.event.inputs.task }}"]
