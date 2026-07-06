@@ -100,7 +100,7 @@ jobs:
             cat > job.yaml <<YAML
           agents:
             - $LINE
-              model_name: anthropic/claude-sonnet-5
+              model_name: anthropic/claude-opus-4-8
               env:
                 CLAUDE_CODE_OAUTH_TOKEN: \${CLAUDE_CODE_OAUTH_TOKEN}
               kwargs:
