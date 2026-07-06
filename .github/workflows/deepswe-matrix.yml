@@ -1,0 +1,145 @@
+name: deepswe-matrix
+
+# Full matrix: {claude, codex} x {symnav, stock} x 40 TS tasks = 160 jobs.
+# Claude = claude-sonnet-5 (effort high) on CLAUDE_CODE_OAUTH_TOKEN.
+# Codex  = gpt-5.4 (reasoning xhigh) on the injected auth.json.
+# Each job runs one task with Pier and uploads its whole jobs/ dir as an artifact.
+
+on:
+  workflow_dispatch:
+    inputs:
+      max_parallel:
+        description: "concurrent jobs (tune vs subscription rate limits)"
+        default: "24"
+
+jobs:
+  run:
+    strategy:
+      fail-fast: false
+      max-parallel: 24
+      matrix:
+        agent: [claude, codex]
+        condition: [symnav, stock]
+        task:
+          - arktype-json-schema-refs-dependencies
+          - csstree-shorthand-expansion-compression
+          - awilix-async-container-initialization
+          - clack-async-autocomplete-options
+          - dynamodb-toolbox-conditional-attribute-requirements
+          - claude-code-by-agents-recursive-delegation
+          - cliffy-config-file-parsing
+          - dynamodb-toolbox-lazy-recursive-schemas
+          - drizzle-orm-window-function-builders
+          - effect-sse-httpapi-streaming
+          - eicrud-keyset-pagination-cursor
+          - happy-dom-deterministic-intersectionobserver
+          - httpx-deterministic-cookie-store
+          - happy-dom-abort-pending-body-reads
+          - ink-grid-box-layout
+          - kea-atomic-signal-selectors
+          - koota-deferred-mutation-buffer
+          - katex-multicolumn-array-spans
+          - koota-composite-trait-aspects
+          - koota-query-predicates
+          - kysely-window-grouping-helpers
+          - meriyah-explicit-resource-declarations
+          - koota-pair-relation-tracking
+          - obsidian-linter-auto-table-of-contents
+          - obsidian-linter-link-format-conversion
+          - ofetch-per-origin-circuit-breaker
+          - obsidian-linter-scoped-ignore-markers
+          - optique-conditional-option-dependencies
+          - prometheus-transactional-reload-status
+          - query-persist-restored-query-state
+          - sql-formatter-bigquery-pipe-formatting
+          - quill-shared-toolbar-focus
+          - superjson-error-stack-serialization
+          - ts-pattern-match-each
+          - testem-bail-on-test-failure
+          - testem-per-launcher-reports
+          - yjs-map-conflict-detection
+          - valibot-recursive-schema-composition
+          - true-myth-iterable-collection-combinators
+          - vitest-duration-sharding
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Free runner disk
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache/CodeQL || true
+          docker system prune -af || true
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Pier
+        run: |
+          python -m pip install -q --upgrade pip
+          python -m pip install -q datacurve-pier
+
+      - name: Clone DeepSWE tasks
+        run: git clone --depth 1 https://github.com/datacurve-ai/deep-swe.git
+
+      - name: Build job config + auth for ${{ matrix.agent }}/${{ matrix.condition }}
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          CODEX_AUTH_JSON_B64: ${{ secrets.CODEX_AUTH_JSON_B64 }}
+        run: |
+          set -euo pipefail
+          A="${{ matrix.agent }}"; C="${{ matrix.condition }}"; T="${{ matrix.task }}"
+          case "$A-$C" in
+            claude-symnav) LINE="import_path: symnav_agent:SymnavClaudeCode" ;;
+            claude-stock)  LINE="name: claude-code" ;;
+            codex-symnav)  LINE="import_path: symnav_agent:SymnavCodex" ;;
+            codex-stock)   LINE="name: codex" ;;
+          esac
+          if [ "$A" = claude ]; then
+            cat > job.yaml <<YAML
+          agents:
+            - $LINE
+              model_name: anthropic/claude-sonnet-5
+              env:
+                CLAUDE_CODE_OAUTH_TOKEN: \${CLAUDE_CODE_OAUTH_TOKEN}
+              kwargs:
+                effort: high
+          datasets:
+            - path: deep-swe/tasks
+              task_names: ["$T"]
+          YAML
+            printf 'CLAUDE_CODE_OAUTH_TOKEN=%s\n' "$CLAUDE_CODE_OAUTH_TOKEN" > .env
+            echo "ENV_ARGS=--env-file .env" >> "$GITHUB_ENV"
+          else
+            cat > job.yaml <<YAML
+          agents:
+            - $LINE
+              model_name: openai/gpt-5.4
+              env:
+                CODEX_FORCE_AUTH_JSON: "1"
+              kwargs:
+                reasoning_effort: xhigh
+          datasets:
+            - path: deep-swe/tasks
+              task_names: ["$T"]
+          YAML
+            mkdir -p ~/.codex
+            printf '%s' "$CODEX_AUTH_JSON_B64" | base64 -d > ~/.codex/auth.json
+            echo "ENV_ARGS=" >> "$GITHUB_ENV"
+          fi
+          echo "----- job.yaml -----"; cat job.yaml
+
+      - name: Run Pier
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+        run: pier run --config job.yaml $ENV_ARGS --env docker || echo "pier exited nonzero"
+
+      - name: Upload cell
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cell-${{ matrix.agent }}-${{ matrix.condition }}-${{ matrix.task }}
+          path: jobs
+          if-no-files-found: ignore
+          retention-days: 21
