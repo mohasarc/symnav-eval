@@ -1,0 +1,81 @@
+name: grade
+
+on:
+  workflow_dispatch:
+    inputs:
+      groups:
+        description: "comma-separated groups to grade (blank = all 6)"
+        required: false
+        default: ""
+
+jobs:
+  grade:
+    strategy:
+      fail-fast: false
+      matrix:
+        group: [symnav-rep0, stock-rep0, symnav-rep1, stock-rep1, symnav-rep2, stock-rep2]
+    runs-on: ubuntu-latest        # native x86_64 — no emulation
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Skip groups not requested
+        id: gate
+        run: |
+          req="${{ github.event.inputs.groups }}"
+          if [ -n "$req" ] && ! echo ",$req," | grep -q ",${{ matrix.group }},"; then
+            echo "run=false" >> "$GITHUB_OUTPUT"; echo "skipping ${{ matrix.group }}"
+          else
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Free runner disk
+        if: steps.gate.outputs.run == 'true'
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache/CodeQL || true
+          docker system prune -af || true
+          df -h /
+
+      - uses: actions/setup-python@v5
+        if: steps.gate.outputs.run == 'true'
+        with:
+          python-version: "3.11"
+
+      - name: Install SWE-PolyBench grader
+        if: steps.gate.outputs.run == 'true'
+        run: |
+          git clone --depth 1 https://github.com/amazon-science/SWE-PolyBench.git
+          python -m pip install -q --upgrade pip
+          python -m pip install -q -r SWE-PolyBench/requirements.txt
+
+      - name: Restore prior results (resume)
+        if: steps.gate.outputs.run == 'true'
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: results-${{ matrix.group }}
+          path: results/${{ matrix.group }}
+
+      - name: Grade ${{ matrix.group }}
+        if: steps.gate.outputs.run == 'true'
+        env:
+          PYTHONPATH: SWE-PolyBench/src
+        run: |
+          mkdir -p results/${{ matrix.group }}
+          python SWE-PolyBench/src/poly_bench_evaluation/run_evaluation.py \
+            --dataset-path polybench_subset.csv \
+            --predictions-path predictions/${{ matrix.group }}.jsonl \
+            --result-path results/${{ matrix.group }} \
+            --repo-path repos \
+            --num-threads 2 \
+            --delete-image \
+            --skip-existing
+
+      - name: Upload results
+        if: always() && steps.gate.outputs.run == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: results-${{ matrix.group }}
+          path: results/${{ matrix.group }}
+          retention-days: 30
+          overwrite: true
