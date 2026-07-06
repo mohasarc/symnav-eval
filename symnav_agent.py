@@ -75,14 +75,15 @@ _SETTINGS_JSON = json.dumps({
     }
 })
 
-# User-level CLAUDE.md (read natively by Claude Code, outside the repo so it never
-# pollutes the patch). This is the "rule to read the skill and use symnav" that
-# matches real usage — the one-line hook alone doesn't teach the agent the tool.
+# Project-level CLAUDE.md / AGENTS.md — written into /app (the agent's working
+# dir), which Claude Code and Codex load natively (the user-level ~/.claude copy
+# does NOT load in headless -p, verified). Excluded from git so it never enters
+# the captured patch (which is `git diff <base> HEAD`).
 _CLAUDE_MD = (
     "# Navigating this TypeScript codebase\n\n"
     "The `symnav` CLI is installed. BEFORE using grep or reading whole files to "
     "locate or understand code, read the symnav skill at "
-    "`~/.claude/skills/symnav/SKILL.md` and use symnav:\n\n"
+    "`.claude/skills/symnav/SKILL.md` and use symnav:\n\n"
     "- `symnav resolve <name>` — find a symbol/file by name (your entry point)\n"
     "- `symnav overview <file>` — a file's symbol tree without opening it\n"
     "- `symnav def <id>` / `symnav refs <id>` — definition / all references\n"
@@ -128,15 +129,17 @@ _AGENT_STEP = InstallStep(
         'chmod +x "$HOME/.local/bin/symnav"; '
         f'echo {_b64(_NUDGE_JS)} | base64 -d > {NUDGE_PATH}; '
         f'echo {_b64(_SETTINGS_JSON)} | base64 -d > {SETTINGS_PATH}; '
-        # skill + directive at user level (outside the repo -> no patch pollution)
-        'mkdir -p "$HOME/.claude/skills/symnav"; '
-        'cp "$HOME/symnav/.claude/skills/symnav/SKILL.md" "$HOME/.claude/skills/symnav/SKILL.md"; '
-        f'echo {_b64(_CLAUDE_MD)} | base64 -d > "$HOME/.claude/CLAUDE.md"; '
+        # PROJECT-level skill + directive in /app (Claude loads these natively);
+        # excluded from git so they never enter the captured patch.
+        'mkdir -p /app/.claude/skills/symnav; '
+        'cp "$HOME/symnav/.claude/skills/symnav/SKILL.md" /app/.claude/skills/symnav/SKILL.md; '
+        f'echo {_b64(_CLAUDE_MD)} | base64 -d > /app/CLAUDE.md; '
+        'printf \'CLAUDE.md\\n.claude/\\n\' >> /app/.git/info/exclude; '
         'symnav --version; '
-        # diagnostic (read-only): does symnav actually work on the task repo?
-        'echo "SYMNAV_DIAG_START"; '
-        '(cd /app 2>/dev/null && git rev-parse --is-inside-work-tree 2>&1 && '
-        ' symnav resolve SuperJSON 2>&1 | head -8) || echo "diag: /app unavailable"; '
+        # diagnostic: confirm CLAUDE.md landed + symnav works on the repo
+        'echo "SYMNAV_DIAG_START"; ls -la /app/CLAUDE.md /app/.claude/skills/symnav/SKILL.md; '
+        '(cd /app && git rev-parse --is-inside-work-tree && '
+        ' symnav resolve SuperJSON 2>&1 | head -8) || echo "diag: symnav/repo issue"; '
         'echo "SYMNAV_DIAG_END"'
     ),
 )
@@ -163,8 +166,8 @@ class SymnavClaudeCode(ClaudeCode):
 # Codex arm
 # ---------------------------------------------------------------------------
 
-_AGENTS_MD = _CLAUDE_MD.replace("~/.claude/skills/symnav/SKILL.md",
-                                "~/.agents/skills/symnav/SKILL.md")
+_AGENTS_MD = _CLAUDE_MD.replace("`.claude/skills/symnav/SKILL.md`",
+                                "the registered `symnav` skill")
 
 # ChatGPT/OpenAI endpoints the Codex subscription (auth.json) needs while air-gapped.
 _CODEX_AUTH_DOMAINS = ["chatgpt.com", "api.openai.com", "auth.openai.com", "openai.com"]
@@ -185,10 +188,15 @@ _CODEX_SYMNAV_STEP = InstallStep(
         'pnpm build; '
         'printf \'#!/usr/bin/env bash\\nexec node "%s/symnav/apps/cli/dist/cli.js" "$@"\\n\' "$HOME" > "$HOME/.local/bin/symnav"; '
         'chmod +x "$HOME/.local/bin/symnav"; '
-        # native Codex skill dir + a rule to read it
+        # native Codex skill registration (~/.agents/skills — verified Codex lists it)
         'cp "$HOME/symnav/.claude/skills/symnav/SKILL.md" "$HOME/.agents/skills/symnav/SKILL.md"; '
-        f'echo {_b64(_AGENTS_MD)} | base64 -d > "$HOME/.agents/AGENTS.md"; '
-        'symnav --version'
+        # PROJECT-level AGENTS.md directive (Codex loads /app/AGENTS.md natively);
+        # excluded from git so it never enters the captured patch.
+        f'echo {_b64(_AGENTS_MD)} | base64 -d > /app/AGENTS.md; '
+        'printf \'AGENTS.md\\n\' >> /app/.git/info/exclude; '
+        'symnav --version; '
+        'echo "SYMNAV_DIAG:"; ls -la /app/AGENTS.md; '
+        '(cd /app && symnav resolve SuperJSON 2>&1 | head -5) || echo "diag: symnav issue"'
     ),
 )
 
