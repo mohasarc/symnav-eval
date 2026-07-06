@@ -74,6 +74,23 @@ _SETTINGS_JSON = json.dumps({
     }
 })
 
+# User-level CLAUDE.md (read natively by Claude Code, outside the repo so it never
+# pollutes the patch). This is the "rule to read the skill and use symnav" that
+# matches real usage — the one-line hook alone doesn't teach the agent the tool.
+_CLAUDE_MD = (
+    "# Navigating this TypeScript codebase\n\n"
+    "The `symnav` CLI is installed. BEFORE using grep or reading whole files to "
+    "locate or understand code, read the symnav skill at "
+    "`~/.claude/skills/symnav/SKILL.md` and use symnav:\n\n"
+    "- `symnav resolve <name>` — find a symbol/file by name (your entry point)\n"
+    "- `symnav overview <file>` — a file's symbol tree without opening it\n"
+    "- `symnav def <id>` / `symnav refs <id>` — definition / all references\n"
+    "- `symnav context <id>` — a symbol's definition, callers, callees, references\n"
+    "- `symnav graph <id>` — call paths across hops\n\n"
+    "It returns just what you asked for at a fraction of the tokens grep/read burn. "
+    "Reach for symnav first; fall back to grep/read only when it can't answer.\n"
+)
+
 
 def _b64(text: str) -> str:
     return base64.b64encode(text.encode()).decode()
@@ -110,7 +127,16 @@ _AGENT_STEP = InstallStep(
         'chmod +x "$HOME/.local/bin/symnav"; '
         f'echo {_b64(_NUDGE_JS)} | base64 -d > {NUDGE_PATH}; '
         f'echo {_b64(_SETTINGS_JSON)} | base64 -d > {SETTINGS_PATH}; '
-        'symnav --version'
+        # skill + directive at user level (outside the repo -> no patch pollution)
+        'mkdir -p "$HOME/.claude/skills/symnav"; '
+        'cp "$HOME/symnav/.claude/skills/symnav/SKILL.md" "$HOME/.claude/skills/symnav/SKILL.md"; '
+        f'echo {_b64(_CLAUDE_MD)} | base64 -d > "$HOME/.claude/CLAUDE.md"; '
+        'symnav --version; '
+        # diagnostic (read-only): does symnav actually work on the task repo?
+        'echo "SYMNAV_DIAG_START"; '
+        '(cd /app 2>/dev/null && git rev-parse --is-inside-work-tree 2>&1 && '
+        ' symnav resolve SuperJSON 2>&1 | head -8) || echo "diag: /app unavailable"; '
+        'echo "SYMNAV_DIAG_END"'
     ),
 )
 
