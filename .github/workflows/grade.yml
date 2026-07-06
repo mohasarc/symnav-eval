@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       groups:
-        description: "comma-separated groups to grade (blank = all 6)"
+        description: "comma-separated groups (blank = all 6)"
         required: false
         default: ""
 
@@ -14,17 +14,17 @@ jobs:
       fail-fast: false
       matrix:
         group: [symnav-rep0, stock-rep0, symnav-rep1, stock-rep1, symnav-rep2, stock-rep2]
-    runs-on: ubuntu-latest        # native x86_64 — no emulation
+    runs-on: ubuntu-latest        # native x86_64
     timeout-minutes: 350
     steps:
       - uses: actions/checkout@v4
 
-      - name: Skip groups not requested
+      - name: Gate
         id: gate
         run: |
           req="${{ github.event.inputs.groups }}"
           if [ -n "$req" ] && ! echo ",$req," | grep -q ",${{ matrix.group }},"; then
-            echo "run=false" >> "$GITHUB_OUTPUT"; echo "skipping ${{ matrix.group }}"
+            echo "run=false" >> "$GITHUB_OUTPUT"
           else
             echo "run=true" >> "$GITHUB_OUTPUT"
           fi
@@ -41,10 +41,14 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install SWE-PolyBench grader
+      - name: Install grader (patched to pull :v1.1)
         if: steps.gate.outputs.run == 'true'
         run: |
           git clone --depth 1 https://github.com/amazon-science/SWE-PolyBench.git
+          # the pre-built images are published as :v1.1, but the harness hardcodes :latest
+          sed -i 's/version: str = "latest"/version: str = "v1.1"/' \
+            SWE-PolyBench/src/poly_bench_evaluation/docker_utils.py
+          grep -n 'version: str' SWE-PolyBench/src/poly_bench_evaluation/docker_utils.py || true
           python -m pip install -q --upgrade pip
           python -m pip install -q -r SWE-PolyBench/requirements.txt
 
@@ -56,20 +60,40 @@ jobs:
           name: results-${{ matrix.group }}
           path: results/${{ matrix.group }}
 
-      - name: Grade ${{ matrix.group }}
+      - name: Grade per-instance (tolerant of missing images / build failures)
         if: steps.gate.outputs.run == 'true'
         env:
           PYTHONPATH: SWE-PolyBench/src
         run: |
-          mkdir -p results/${{ matrix.group }}
-          python SWE-PolyBench/src/poly_bench_evaluation/run_evaluation.py \
-            --dataset-path polybench_subset.csv \
-            --predictions-path predictions/${{ matrix.group }}.jsonl \
-            --result-path results/${{ matrix.group }} \
-            --repo-path repos \
-            --num-threads 2 \
-            --delete-image \
-            --skip-existing
+          mkdir -p results/${{ matrix.group }} split
+          python - <<'PY'
+          import json, pandas as pd, pathlib
+          group = "${{ matrix.group }}"
+          df = pd.read_csv("polybench_subset.csv")
+          preds = [json.loads(l) for l in open(f"predictions/{group}.jsonl")]
+          pathlib.Path("split").mkdir(exist_ok=True)
+          for p in preds:
+              iid = p["instance_id"]
+              df[df.instance_id == iid].to_csv(f"split/{iid}.csv", index=False)
+              with open(f"split/{iid}.jsonl", "w") as f:
+                  f.write(json.dumps(p) + "\n")
+          print(f"{len(preds)} instances to grade")
+          PY
+          fail=0; ok=0
+          for iid in $(ls split/*.csv | sed 's#split/##; s#.csv##'); do
+            echo "::group::grade $iid"
+            if python SWE-PolyBench/src/poly_bench_evaluation/run_evaluation.py \
+                --dataset-path split/$iid.csv \
+                --predictions-path split/$iid.jsonl \
+                --result-path results/${{ matrix.group }} \
+                --repo-path repos --num-threads 1 --delete-image --skip-existing; then
+              ok=$((ok+1))
+            else
+              fail=$((fail+1)); echo "  $iid could not be graded (no image / build failed)"
+            fi
+            echo "::endgroup::"
+          done
+          echo "graded ok=$ok  ungradeable=$fail"
 
       - name: Upload results
         if: always() && steps.gate.outputs.run == 'true'
@@ -80,12 +104,12 @@ jobs:
           retention-days: 30
           overwrite: true
 
-      - name: Upload build logs (diagnose failures)
+      - name: Upload build logs
         if: always() && steps.gate.outputs.run == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: buildlogs-${{ matrix.group }}
-          path: SWE-PolyBench/build_logs
+          path: build_logs
           retention-days: 30
           overwrite: true
           if-no-files-found: ignore
