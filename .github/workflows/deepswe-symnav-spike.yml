@@ -1,0 +1,97 @@
+name: deepswe-symnav-spike
+
+# Proves the symnav arm: custom agent installs symnav in the air-gapped sandbox,
+# passes the firm "use symnav" directive, and (we check) actually calls it.
+
+on:
+  workflow_dispatch:
+    inputs:
+      task:
+        description: "DeepSWE task id (TS)"
+        default: "superjson-error-stack-serialization"
+      model:
+        default: "anthropic/claude-sonnet-4-5"
+
+jobs:
+  spike:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4   # brings in symnav_agent.py
+
+      - name: Free runner disk
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache/CodeQL || true
+          docker system prune -af || true
+          df -h /
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Pier
+        run: |
+          python -m pip install -q --upgrade pip
+          python -m pip install -q datacurve-pier
+
+      - name: Clone DeepSWE tasks
+        run: git clone --depth 1 https://github.com/datacurve-ai/deep-swe.git
+
+      - name: Write job config (symnav arm)
+        run: |
+          cat > job.yaml <<YAML
+          agents:
+            - import_path: symnav_agent:SymnavClaudeCode
+              model_name: ${{ github.event.inputs.model }}
+              env:
+                CLAUDE_CODE_OAUTH_TOKEN: \${CLAUDE_CODE_OAUTH_TOKEN}
+              kwargs:
+                append_system_prompt: |
+                  ## symnav — REQUIRED for navigating this TypeScript codebase
+
+                  For any code navigation on this task you MUST use the \`symnav\` CLI
+                  (run it via the Bash tool) BEFORE grepping or reading whole files to
+                  locate code. Fall back to grep/read only when symnav cannot answer.
+
+                  - \`symnav resolve <name>\` — find any symbol or file by name.
+                  - \`symnav overview <file>\` — a file's whole symbol tree without opening it.
+                  - \`symnav def <id>\` — where a symbol is defined.
+                  - \`symnav refs <id>\` — every reference/call site.
+                  - \`symnav context <id>\` — a symbol's definition, callers, callees, refs.
+                  - \`symnav graph <id>\` — call paths across hops.
+
+                  Each returns just what you asked for at a fraction of the tokens
+                  grep/read burn. Start every navigation step with the matching symnav command.
+          datasets:
+            - path: deep-swe/tasks
+              task_names: ["${{ github.event.inputs.task }}"]
+          YAML
+          echo "----- job.yaml -----"; cat job.yaml
+
+      - name: Write env file (token from secret; never printed)
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+        run: printf 'CLAUDE_CODE_OAUTH_TOKEN=%s\n' "$CLAUDE_CODE_OAUTH_TOKEN" > .env
+
+      - name: Run Pier (symnav arm)
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+        run: pier run --config job.yaml --env-file .env --env docker || echo "pier exited nonzero"
+
+      - name: Results + symnav adoption check
+        if: always()
+        run: |
+          echo "===== reward ====="; find jobs -name "reward.json" -exec cat {} \; 2>/dev/null
+          echo; echo "===== did the agent CALL symnav? (grep trajectory) ====="
+          grep -rhoE "symnav (resolve|overview|def|refs|context|graph)[^\"]*" jobs 2>/dev/null | sort | uniq -c | head -20 || echo "no symnav calls found"
+          echo "===== install: symnav version line ====="
+          grep -rhoE "symnav[^ ]* [0-9]+\.[0-9]+\.[0-9]+" jobs 2>/dev/null | head -3 || true
+
+      - name: Upload job dir
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: symnav-spike-job
+          path: jobs
+          if-no-files-found: ignore
+          retention-days: 14
