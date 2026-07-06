@@ -79,3 +79,13 @@ jobs:
           path: results/${{ matrix.group }}
           retention-days: 30
           overwrite: true
+
+      - name: Upload build logs (diagnose failures)
+        if: always() && steps.gate.outputs.run == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: buildlogs-${{ matrix.group }}
+          path: SWE-PolyBench/build_logs
+          retention-days: 30
+          overwrite: true
+          if-no-files-found: ignore
