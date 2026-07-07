@@ -1,14 +1,13 @@
 name: deepswe-matrix
 
-# Two independent per-agent jobs (parallel services). Resilient to subscription
-# rate/usage limits: on a limit error, wait 25m and retry (up to ~5h/job).
-# 'conditions' input filters which arms run (e.g. 'stock' to backfill).
-
 on:
   workflow_dispatch:
     inputs:
+      agents:
+        description: "comma-sep agents (blank=all: claude,codex)"
+        default: "claude,codex"
       conditions:
-        description: "comma-sep conditions to run (blank=all)"
+        description: "comma-sep conditions (blank=all)"
         default: "symnav,stock"
 
 jobs:
@@ -63,13 +62,14 @@ jobs:
     timeout-minutes: 350
     steps:
       - uses: actions/checkout@v4
-      - name: Gate condition
+      - name: Gate
         id: gate
         run: |
-          req="${{ github.event.inputs.conditions }}"
-          if [ -n "$req" ] && ! echo ",$req," | grep -q ",${{ matrix.condition }},"; then
-            echo "run=false" >> "$GITHUB_OUTPUT"
-          else echo "run=true" >> "$GITHUB_OUTPUT"; fi
+          reqC="${{ github.event.inputs.conditions }}"; reqA="${{ github.event.inputs.agents }}"
+          ok=true
+          if [ -n "$reqC" ] && ! echo ",$reqC," | grep -q ",${{ matrix.condition }},"; then ok=false; fi
+          if [ -n "$reqA" ] && ! echo ",$reqA," | grep -q ",claude,"; then ok=false; fi
+          echo "run=$ok" >> "$GITHUB_OUTPUT"
       - name: Free runner disk
         if: steps.gate.outputs.run == 'true'
         run: |
@@ -114,7 +114,7 @@ jobs:
         env:
           PYTHONPATH: ${{ github.workspace }}
         run: |
-          LIMIT_RE='session limit|usage limit|hit your (usage|session) limit|"api_error_status":[[:space:]]*429|try again at|resets [0-9]'
+          LIMIT_RE='session limit|usage limit|hit your (usage|session) limit|"api_error_status":[[:space:]]*429|try again at'
           done=0
           for attempt in $(seq 1 12); do
             rm -rf jobs
@@ -187,13 +187,14 @@ jobs:
     timeout-minutes: 350
     steps:
       - uses: actions/checkout@v4
-      - name: Gate condition
+      - name: Gate
         id: gate
         run: |
-          req="${{ github.event.inputs.conditions }}"
-          if [ -n "$req" ] && ! echo ",$req," | grep -q ",${{ matrix.condition }},"; then
-            echo "run=false" >> "$GITHUB_OUTPUT"
-          else echo "run=true" >> "$GITHUB_OUTPUT"; fi
+          reqC="${{ github.event.inputs.conditions }}"; reqA="${{ github.event.inputs.agents }}"
+          ok=true
+          if [ -n "$reqC" ] && ! echo ",$reqC," | grep -q ",${{ matrix.condition }},"; then ok=false; fi
+          if [ -n "$reqA" ] && ! echo ",$reqA," | grep -q ",codex,"; then ok=false; fi
+          echo "run=$ok" >> "$GITHUB_OUTPUT"
       - name: Free runner disk
         if: steps.gate.outputs.run == 'true'
         run: |
@@ -238,7 +239,7 @@ jobs:
         env:
           PYTHONPATH: ${{ github.workspace }}
         run: |
-          LIMIT_RE='session limit|usage limit|hit your (usage|session) limit|"api_error_status":[[:space:]]*429|try again at|resets [0-9]'
+          LIMIT_RE='session limit|usage limit|hit your (usage|session) limit|"api_error_status":[[:space:]]*429|try again at'
           done=0
           for attempt in $(seq 1 12); do
             rm -rf jobs
