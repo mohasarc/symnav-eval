@@ -1,16 +1,21 @@
 name: deepswe-matrix
 
-# Two INDEPENDENT jobs so Claude (Anthropic) and Codex (OpenAI) run fully in
-# parallel, each with its own concurrency cap. 2 jobs x 80 cells = 160 total.
+# Two independent per-agent jobs (parallel services). Resilient to subscription
+# rate/usage limits: on a limit error, wait 25m and retry (up to ~5h/job).
+# 'conditions' input filters which arms run (e.g. 'stock' to backfill).
 
 on:
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      conditions:
+        description: "comma-sep conditions to run (blank=all)"
+        default: "symnav,stock"
 
 jobs:
   claude:
     strategy:
       fail-fast: false
-      max-parallel: 20
+      max-parallel: 8
       matrix:
         condition: [symnav, stock]
         task:
@@ -55,21 +60,33 @@ jobs:
           - true-myth-iterable-collection-combinators
           - vitest-duration-sharding
     runs-on: ubuntu-latest
-    timeout-minutes: 150
+    timeout-minutes: 350
     steps:
       - uses: actions/checkout@v4
+      - name: Gate condition
+        id: gate
+        run: |
+          req="${{ github.event.inputs.conditions }}"
+          if [ -n "$req" ] && ! echo ",$req," | grep -q ",${{ matrix.condition }},"; then
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          else echo "run=true" >> "$GITHUB_OUTPUT"; fi
       - name: Free runner disk
+        if: steps.gate.outputs.run == 'true'
         run: |
           sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache/CodeQL || true
           docker system prune -af || true
       - uses: actions/setup-python@v5
+        if: steps.gate.outputs.run == 'true'
         with:
           python-version: "3.12"
       - name: Install Pier
+        if: steps.gate.outputs.run == 'true'
         run: python -m pip install -q --upgrade pip && python -m pip install -q datacurve-pier
       - name: Clone DeepSWE tasks
+        if: steps.gate.outputs.run == 'true'
         run: git clone --depth 1 https://github.com/datacurve-ai/deep-swe.git
       - name: Build job config
+        if: steps.gate.outputs.run == 'true'
         env:
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           CODEX_AUTH_JSON_B64: ${{ secrets.CODEX_AUTH_JSON_B64 }}
@@ -92,12 +109,26 @@ jobs:
             printf 'CLAUDE_CODE_OAUTH_TOKEN=%s\n' "$CLAUDE_CODE_OAUTH_TOKEN" > .env
             echo "ENV_ARGS=--env-file .env" >> "$GITHUB_ENV"
           echo "----- job.yaml -----"; cat job.yaml
-      - name: Run Pier
+      - name: Run Pier (wait-and-retry on rate/usage limit)
+        if: steps.gate.outputs.run == 'true'
         env:
           PYTHONPATH: ${{ github.workspace }}
-        run: pier run --config job.yaml $ENV_ARGS --env docker || echo "pier exited nonzero"
+        run: |
+          LIMIT_RE='session limit|usage limit|hit your (usage|session) limit|"api_error_status":[[:space:]]*429|try again at|resets [0-9]'
+          done=0
+          for attempt in $(seq 1 12); do
+            rm -rf jobs
+            pier run --config job.yaml $ENV_ARGS --env docker || true
+            if grep -rqiE "$LIMIT_RE" jobs 2>/dev/null; then
+              echo "::warning::rate/usage limit on attempt $attempt — sleeping 25m then retrying"
+              sleep 1500
+              continue
+            fi
+            echo "completed on attempt $attempt"; done=1; break
+          done
+          [ "$done" = 1 ] || echo "::warning::still limited after retries"
       - name: Upload cell
-        if: always()
+        if: always() && steps.gate.outputs.run == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: cell-claude-${{ matrix.condition }}-${{ matrix.task }}
@@ -108,7 +139,7 @@ jobs:
   codex:
     strategy:
       fail-fast: false
-      max-parallel: 20
+      max-parallel: 8
       matrix:
         condition: [symnav, stock]
         task:
@@ -153,28 +184,40 @@ jobs:
           - true-myth-iterable-collection-combinators
           - vitest-duration-sharding
     runs-on: ubuntu-latest
-    timeout-minutes: 150
+    timeout-minutes: 350
     steps:
       - uses: actions/checkout@v4
+      - name: Gate condition
+        id: gate
+        run: |
+          req="${{ github.event.inputs.conditions }}"
+          if [ -n "$req" ] && ! echo ",$req," | grep -q ",${{ matrix.condition }},"; then
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          else echo "run=true" >> "$GITHUB_OUTPUT"; fi
       - name: Free runner disk
+        if: steps.gate.outputs.run == 'true'
         run: |
           sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache/CodeQL || true
           docker system prune -af || true
       - uses: actions/setup-python@v5
+        if: steps.gate.outputs.run == 'true'
         with:
           python-version: "3.12"
       - name: Install Pier
+        if: steps.gate.outputs.run == 'true'
         run: python -m pip install -q --upgrade pip && python -m pip install -q datacurve-pier
       - name: Clone DeepSWE tasks
+        if: steps.gate.outputs.run == 'true'
         run: git clone --depth 1 https://github.com/datacurve-ai/deep-swe.git
       - name: Build job config
+        if: steps.gate.outputs.run == 'true'
         env:
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           CODEX_AUTH_JSON_B64: ${{ secrets.CODEX_AUTH_JSON_B64 }}
         run: |
           set -euo pipefail
           C="${{ matrix.condition }}"; T="${{ matrix.task }}"
-          if [ "$C" = symnav ]; then LINE="import_path: symnav_agent:SymnavCodex"; else LINE="name: codex"; fi
+          if [ "$C" = symnav ]; then LINE="import_path: symnav_agent:SymnavCodex"; else LINE="import_path: symnav_agent:CodexStock"; fi
             cat > job.yaml <<YAML
           agents:
             - $LINE
@@ -190,12 +233,26 @@ jobs:
             mkdir -p ~/.codex; printf '%s' "$CODEX_AUTH_JSON_B64" | base64 -d > ~/.codex/auth.json
             echo "ENV_ARGS=" >> "$GITHUB_ENV"
           echo "----- job.yaml -----"; cat job.yaml
-      - name: Run Pier
+      - name: Run Pier (wait-and-retry on rate/usage limit)
+        if: steps.gate.outputs.run == 'true'
         env:
           PYTHONPATH: ${{ github.workspace }}
-        run: pier run --config job.yaml $ENV_ARGS --env docker || echo "pier exited nonzero"
+        run: |
+          LIMIT_RE='session limit|usage limit|hit your (usage|session) limit|"api_error_status":[[:space:]]*429|try again at|resets [0-9]'
+          done=0
+          for attempt in $(seq 1 12); do
+            rm -rf jobs
+            pier run --config job.yaml $ENV_ARGS --env docker || true
+            if grep -rqiE "$LIMIT_RE" jobs 2>/dev/null; then
+              echo "::warning::rate/usage limit on attempt $attempt — sleeping 25m then retrying"
+              sleep 1500
+              continue
+            fi
+            echo "completed on attempt $attempt"; done=1; break
+          done
+          [ "$done" = 1 ] || echo "::warning::still limited after retries"
       - name: Upload cell
-        if: always()
+        if: always() && steps.gate.outputs.run == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: cell-codex-${{ matrix.condition }}-${{ matrix.task }}

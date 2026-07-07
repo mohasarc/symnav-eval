@@ -201,7 +201,17 @@ _CODEX_SYMNAV_STEP = InstallStep(
 )
 
 
-class SymnavCodex(Codex):
+class CodexStock(Codex):
+    """Native codex (no symnav) but with the ChatGPT subscription endpoint
+    allowlisted — the stock arm needs this or the air-gapped proxy 403s on
+    wss://chatgpt.com/backend-api/codex/responses."""
+
+    def network_allowlist(self) -> NetworkAllowlist:
+        base = super().network_allowlist()
+        return NetworkAllowlist(domains=sorted(set(base.domains) | set(_CODEX_AUTH_DOMAINS)))
+
+
+class SymnavCodex(CodexStock):
     """codex with symnav installed + skill registered in ~/.agents/skills."""
 
     def install_spec(self) -> AgentInstallSpec:
@@ -211,6 +221,4 @@ class SymnavCodex(Codex):
 
     def network_allowlist(self) -> NetworkAllowlist:
         base = super().network_allowlist()
-        return NetworkAllowlist(
-            domains=sorted(set(base.domains) | set(_INSTALL_DOMAINS) | set(_CODEX_AUTH_DOMAINS))
-        )
+        return NetworkAllowlist(domains=sorted(set(base.domains) | set(_INSTALL_DOMAINS)))
